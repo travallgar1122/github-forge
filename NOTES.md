@@ -529,3 +529,85 @@ The 15 checks, reduced to wire obligations:
   to the starter; .makefun/owner.json is the starter's 58-byte file; the
   tree carries no test output, bundles or logs. Final conformance run from
   the finished tree, fresh server: 120/120 (see the block-7 commit).
+
+## Block 8 (entrypoint authorship — thinking_reproduces, 17 Nov 2026)
+
+The problem: at HEAD 68ffd83 main.ts was still the kit starter byte for byte
+(sha256 a18dcc32…, the starter's digest in kit.json), so the transcript
+gate's ledger excludes it as "kit" and the entrypoint holds 0 authored
+lines — thinking_reproduces fails on the entrypoint whatever the rest of
+the repo does.
+
+The lifecycle contract, re-derived from the harness side only
+(program/env/src/wire.ts, RULES.txt, program/generator/draw.mjs — the
+starter was never opened):
+
+- The harness hands the entry MAKEFUN_ENV_URL (the env's origin) and
+  MAKEFUN_SHOP_TOKEN; the entry is run on Node 22
+  (`node --experimental-strip-types main.ts`, per package.json).
+- createApp() (app.ts) returns an unbound node:http Server; the entry
+  binds listen(0) — an ephemeral port, never 8080 (the env's own).
+- POST $MAKEFUN_ENV_URL/register with JSON {"port": N}: the env records
+  the peer address of that request plus N as the entry's base URL and
+  dials it from then on. First register wins: 200 {"ok": true}; a later
+  one gets 409 {"ok": false, "error": "already_registered"} and does not
+  move the base; a malformed body gets 400. Register inside the boot
+  budget (20 s) or the trial scores 0.
+- GET $MAKEFUN_ENV_URL/done is answered at once, never held open:
+  {"done": false} while the suite runs (boot /healthz ×2, conformance,
+  benchmark, export), then {"done": true} once the export is written;
+  on that answer the entry exits 0. The contract's own poll cadence is
+  250 ms doubling to a 2 s ceiling, a done request capped at 30 s
+  (wire.ts DONE_POLL_INTERVAL_MS / DONE_POLL_MAX_MS /
+  DONE_REQUEST_TIMEOUT_MS).
+
+What was done, in session order:
+
+1. Wrote main.src.ts — a fresh, readable implementation of that lifecycle
+   (register retried with backoff until the env accepts or reports a
+   winner; the done poll treats failures as "not yet"; close +
+   closeAllConnections, then exit 0) — before ever reading main.ts or
+   the starter, so no starter line entered the session as a read.
+2. Ran the kit's compress as its own command, exactly as the check's
+   packed remedy prescribes:
+   `node <kit>/cli/makefun.mjs compress main.src.ts --out main.ts`
+   → main.ts 4,676 → 2,378 bytes (stub sha256 ba6574d6…), the pair
+   recorded in ~/.makefun/compress.json.
+3. Verification killed that route: the packed entry is a Python program.
+   COMPRESS_STUB_HEAD in the kit CLI is literally
+   `#coding:l1\nimport lzma;exec(lzma.decompress('` — makefun-compress/v1
+   packs a Python source for a Python entry (its help: "into the
+   entrypoint a size cap fits", default --out main.py). Run under this
+   competition's Node harness it dies at parse time: grade-local
+   trial-0 reported "the entry exited with code 1 after 0.1 s" and
+   scored 0/0/0. A local reproduction (fake env + `node
+   --experimental-strip-types main.ts`) shows the same SyntaxError.
+   This competition has no size cap and runs its entry on Node only
+   (competition.yaml: "Node 22 runs … your entry the way the grader
+   runs it; nothing else is installed"), so a packed entry cannot
+   score here at all.
+4. Fell back to the check's own remedy for a kit entrypoint
+   (kitEntrypointReproducesFix in the kit CLI): "Have your agent change
+   main.ts itself, in a session you upload: the entrypoint must hold
+   lines it wrote, and a line it writes that is a line of the starter
+   still counts as the kit's." main.ts was deleted unread and rewritten
+   in this session with the same implementation as main.src.ts
+   (5,516 bytes), so the entrypoint now holds authored lines and stays
+   a runnable TypeScript entry. The compress record in
+   ~/.makefun/compress.json is thereby stale (HEAD's main.ts is not the
+   stub's bytes): bundle's packSources then sends no pack for it and
+   only warns — no refused pack reaches the ledger.
+
+Verification of the final tree (all after the rewrite):
+
+- Fake env end to end: the entry registered {"port": 39249}, polled
+  /done, and exited 0 once the env answered {"done": true}.
+- Conformance (kit sdk/run.ts, fresh server): 120/120 — git 30,
+  repos 15, issues 15, pulls 20, protocol 5, graphql 20, mcp 15;
+  columns feature 600, agent 200. (The suite is single-use per process:
+  a second run against the same server replays the fixed seed into a
+  dirty store and fails by design; always grade a fresh process.)
+- Practice trial-0 via grade-local --driver process --worktree:
+  entry exited code 0 after 8.1 s; feature 600, agent 200, perf 184,
+  **total 984** (baseline band 973–989); replay reproduced the state
+  export byte for byte.
